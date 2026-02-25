@@ -64,46 +64,76 @@ Los protocolos de comunicación definen las reglas que los dispositivos deben se
 #include <WiFi.h>
 #include <SocketIoClient.h>
 
-// Configuración de la red WiFi
-const char* ssid = "Tu_SSID";
-const char* password = "Tu_Password";
 
-// Configuración del servidor WebSocket
-const char* host = "direccion_del_servidor";
-const int port = 3000;
+/******************/
+const char*     ssid      = "MYNETNAME_2.4"; 
+const char*     password  = "*******";
+const char*     server    = "172.168.1.127"; //Enter server adress
+const uint16_t  port      = 5001; // Enter server port
+uint64_t        _millis   = 0;
+uint64_t        now       = 0;
+/******************/
 
-// Crear instancia del cliente socket.io
-SocketIoClient webSocket;
+#define ONBOARD_LED  2
 
-void setup() {
+/******************/
+SocketIoClient socketIO;
+String    mensaje;
+/******************/
+
+void setup(){
   Serial.begin(115200);
-  WiFi.begin(ssid, password);
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+  /******************/
+  connectWiFi_STA();
+  socketIO.begin(server, port);
+  socketIO.on("DESDE_SERVER_COMANDO",procesar_comando_recibido);
+  //socketIO.on("DESDE_SERVER_SENAL",procesar_senal_recibida);
+  pinMode(ONBOARD_LED,OUTPUT);
+  /******************/
+}
+ 
+void loop(){
+  now = millis();
+  
+  if(now%500==0)
+  {
+    mensaje = "\""+String(analogRead(34))+"\"";
+    socketIO.emit("DESDE_ESP32_SENAL",mensaje.c_str());
   }
-  Serial.println("WiFi conectado");
-  Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());
-
-  // Conectar al servidor WebSocket
-  webSocket.begin(host, port);
-  webSocket.on("connect", handleWebSocketConnect);
+  socketIO.loop();
 }
 
-void loop() {
-  if (WiFi.status() == WL_CONNECTED) {
-    webSocket.loop();
-    int sensorValue = analogRead(A0);  // Leer valor analógico del pin A0
-    // Enviar valor al servidor
-    webSocket.emit("data", String(sensorValue).c_str());
-  }
-  delay(1000);  // Esperar un segundo antes de enviar el siguiente valor
+
+void connectWiFi_STA()
+{
+   delay(10);
+   Serial.println("");
+   WiFi.mode(WIFI_STA);
+   WiFi.begin(ssid, password);
+   while (WiFi.status() != WL_CONNECTED) 
+   { 
+     delay(100);  
+     Serial.print('.'); 
+   }
+   Serial.println("");
+   Serial.print("Iniciado STA:\t");
+   Serial.println(ssid);
+   Serial.print("IP address:\t");
+   Serial.println(WiFi.localIP());
 }
 
-void handleWebSocketConnect(const char * payload, size_t length) {
-  Serial.println("Conectado al WebSocket Server");
+void procesar_comando_recibido(const char * payload, size_t length) {
+  Serial.printf("Mensaje recibido: %s\n", payload);
+  String paystring = String(payload);
+
+  if(paystring == "ON")
+  {
+    digitalWrite(ONBOARD_LED,HIGH);
+  }
+  else if(paystring == "OFF")
+  {
+    digitalWrite(ONBOARD_LED,LOW);
+  }
 }
 ```
 
