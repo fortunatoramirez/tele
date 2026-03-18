@@ -88,26 +88,6 @@ El sistema desarrollado en esta práctica funcionará de la siguiente manera:
 
 ---
 
-## 4. Diagrama general de funcionamiento
-
-```text
-[ IMU 9DoF ]
-     |
-     | I2C
-     v
-[ ESP32 ]
-     |
-     | WiFi
-     v
-[ Servidor Node.js en PC ]
-     |
-     | Socket.IO
-     v
-[ Clientes web ]
-```
-
----
-
 ## 5. Conexión del hardware
 
 Si se realiza la conexión por I2C con el ESP32, se puede usar la asignación típica:
