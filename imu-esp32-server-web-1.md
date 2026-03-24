@@ -595,7 +595,7 @@ El estudiante deberá realizar al menos una de las siguientes modificaciones:
 
 # Actualización final de la práctica
 
-### Visualización remota del módulo SparkFun Qwiic 9DoF IMU Breakout (ISM330DHCX + MMC5983MA)
+### Para el módulo SparkFun Qwiic 9DoF IMU Breakout (ISM330DHCX + MMC5983MA)
 
 En esta actualización se trabajará con el módulo de SparkFun **Qwiic 9DoF IMU Breakout - ISM330DHCX + MMC5983MA**. Para esta etapa de la práctica se utilizará principalmente la parte del **ISM330DHCX**, es decir:
 
