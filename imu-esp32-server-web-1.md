@@ -585,3 +585,612 @@ El estudiante deberá realizar al menos una de las siguientes modificaciones:
 3. Cambiar el color de la figura según la aceleración.
 4. Agregar una segunda figura que responda a otro eje del sensor.
 5. Hacer que la interfaz muestre una alerta cuando la inclinación supere cierto límite.
+
+
+
+---
+---
+---
+
+
+# Actualización final de la práctica
+
+### Visualización remota del módulo SparkFun Qwiic 9DoF IMU Breakout (ISM330DHCX + MMC5983MA)
+
+En esta actualización se trabajará con el módulo de SparkFun **Qwiic 9DoF IMU Breakout - ISM330DHCX + MMC5983MA**. Para esta etapa de la práctica se utilizará principalmente la parte del **ISM330DHCX**, es decir:
+
+* **Acelerómetro**
+* **Giroscopio**
+
+La visualización remota se realizará mediante:
+
+* **ESP32**
+* **Node.js**
+* **Socket.IO**
+* **Página web en HTML**
+
+En esta versión, la figura mostrada en pantalla no representa un desplazamiento real en el espacio, sino una **inclinación relativa** de la plaquita IMU con respecto a una posición central calibrada. Esto hace que el comportamiento sea más estable y más claro para observar el efecto del acelerómetro y del giroscopio.
+
+---
+
+## Bibliotecas que se deben instalar en el Arduino IDE
+
+Antes de cargar el programa al ESP32, deben instalarse las siguientes bibliotecas en el Arduino IDE:
+
+1. **SparkFun ISM330DHCX Arduino Library**
+2. **SparkFun MMC5983MA Magnetometer Arduino Library**
+
+> Aunque en esta actualización el código utiliza principalmente el **ISM330DHCX**, también se deja instalada la biblioteca del **MMC5983MA**, ya que forma parte del mismo módulo y puede utilizarse en ampliaciones posteriores de la práctica.
+
+---
+
+## Descripción general del funcionamiento
+
+El sistema final funciona de la siguiente manera:
+
+1. El **ESP32** lee los datos del acelerómetro y del giroscopio del módulo IMU.
+2. A partir de esos datos calcula:
+
+   * una inclinación lateral (**roll**)
+   * una inclinación frontal (**pitch**)
+   * una velocidad angular sobre el eje Z (**gz**)
+3. El ESP32 envía estos datos a un servidor **Node.js** usando **Socket.IO**.
+4. La página web recibe la información y dibuja una figura en un lienzo.
+5. El usuario puede calibrar la posición central desde la propia página web.
+
+---
+
+## Nota importante sobre la calibración
+
+En esta implementación, la **posición central** de la plaquita IMU no está fijada por fábrica.
+La posición central será la pose en la que el usuario coloque la placa al momento de presionar el botón:
+
+**Calibrar centro**
+
+Por lo tanto, la plaquita puede estar:
+
+* sobre la mesa
+* sostenida frente al usuario
+* en una ligera inclinación
+* o en cualquier orientación deseada
+
+siempre y cuando esa pose sea tomada como referencia mediante la calibración.
+
+---
+
+# 1. Código del ESP32
+
+Este código debe cargarse en el ESP32.
+En donde dice `NOMBRE_DE_LA_RED`, `CONTRASENA_DE_LA_RED` y `DIRECCION_IP_DEL_SERVIDOR`, el estudiante debe colocar los datos correspondientes a su red y a la computadora donde se ejecutará el servidor Node.js.
+
+```cpp
+#include <WiFi.h>
+#include <Wire.h>
+#include <SocketIoClient.h>
+#include <SparkFun_ISM330DHCX.h>
+#include <math.h>
+
+const char* ssid = "NOMBRE_DE_LA_RED";
+const char* password = "CONTRASENA_DE_LA_RED";
+const char* host = "DIRECCION_IP_DEL_SERVIDOR";
+const uint16_t port = 5002;
+
+SocketIoClient socketIO;
+SparkFun_ISM330DHCX imu;
+
+// Centro visual
+const float CX = 350.0f;
+const float CY = 250.0f;
+
+// Estado visual
+float posX = CX;
+float posY = CY;
+float angulo = 0.0f;
+
+// Señales filtradas
+float pitchFiltrado = 0.0f;
+float rollFiltrado  = 0.0f;
+float gzFiltrado    = 0.0f;
+
+// Referencia calibrada
+float pitch0 = 0.0f;
+float roll0  = 0.0f;
+float gz0    = 0.0f;
+
+// Mapeo visual
+bool invertirX = false;
+bool invertirY = true;
+
+// Ganancias
+float gananciaXY = 8.0f;
+float gananciaGiro = 0.20f;
+
+// Tiempos
+unsigned long tAnterior = 0;
+unsigned long tLectura = 0;
+unsigned long tEnvio = 0;
+
+// Calibración no bloqueante
+bool calibrando = false;
+int muestrasCal = 0;
+const int N_CAL = 120;
+
+float sumaPitch = 0.0f;
+float sumaRoll  = 0.0f;
+float sumaGz    = 0.0f;
+
+float aplicarZonaMuerta(float valor, float umbral) {
+  if (valor > -umbral && valor < umbral) return 0.0f;
+  return valor;
+}
+
+float rad2deg(float r) {
+  return r * 180.0f / PI;
+}
+
+void iniciarCalibracion() {
+  calibrando = true;
+  muestrasCal = 0;
+  sumaPitch = 0.0f;
+  sumaRoll  = 0.0f;
+  sumaGz    = 0.0f;
+  Serial.println("Iniciando calibracion...");
+}
+
+void terminarCalibracion() {
+  if (muestrasCal > 0) {
+    pitch0 = sumaPitch / muestrasCal;
+    roll0  = sumaRoll  / muestrasCal;
+    gz0    = sumaGz    / muestrasCal;
+  }
+
+  pitchFiltrado = 0.0f;
+  rollFiltrado  = 0.0f;
+  gzFiltrado    = 0.0f;
+
+  posX = CX;
+  posY = CY;
+  angulo = 0.0f;
+
+  calibrando = false;
+
+  Serial.println("Calibracion terminada");
+  Serial.print("pitch0 = "); Serial.println(pitch0, 4);
+  Serial.print("roll0  = "); Serial.println(roll0, 4);
+  Serial.print("gz0    = "); Serial.println(gz0, 4);
+}
+
+void ponerAnguloEnCero() {
+  angulo = 0.0f;
+  gzFiltrado = 0.0f;
+  Serial.println("Angulo en cero");
+}
+
+void resetTotalInterno() {
+  posX = CX;
+  posY = CY;
+  angulo = 0.0f;
+  pitchFiltrado = 0.0f;
+  rollFiltrado  = 0.0f;
+  gzFiltrado    = 0.0f;
+  Serial.println("Reset total");
+}
+
+void onCalibrarOffsets(const char* payload, size_t length) {
+  iniciarCalibracion();
+}
+
+void onResetOrientacion(const char* payload, size_t length) {
+  ponerAnguloEnCero();
+}
+
+void onResetTotal(const char* payload, size_t length) {
+  resetTotalInterno();
+}
+
+void conectarWiFi() {
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(300);
+    Serial.print(".");
+  }
+
+  Serial.println();
+  Serial.println("WiFi conectado");
+  Serial.println(WiFi.localIP());
+}
+
+void conectarIMU() {
+  Wire.begin(21, 22);
+
+  while (!imu.begin(Wire)) {
+    Serial.println("Error al detectar ISM330DHCX. Reintentando...");
+    delay(1000);
+  }
+
+  imu.setAccelFullScale(ISM_2g);
+  imu.setGyroFullScale(ISM_250dps);
+  imu.setAccelDataRate(ISM_XL_ODR_104Hz);
+  imu.setGyroDataRate(ISM_GY_ODR_104Hz);
+
+  Serial.println("ISM330DHCX detectado correctamente");
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  conectarWiFi();
+  conectarIMU();
+
+  socketIO.begin(host, port);
+
+  socketIO.on("calibrar_offsets", onCalibrarOffsets);
+  socketIO.on("reset_orientacion", onResetOrientacion);
+  socketIO.on("reset_total", onResetTotal);
+
+  tAnterior = millis();
+  tLectura = millis();
+  tEnvio = millis();
+
+  iniciarCalibracion();
+}
+
+void loop() {
+  socketIO.loop();
+
+  unsigned long ahora = millis();
+
+  if (ahora - tLectura >= 25) {
+    tLectura = ahora;
+
+    sfe_ism_data_t accel;
+    sfe_ism_data_t gyro;
+
+    bool okA = imu.getAccel(&accel);
+    bool okG = imu.getGyro(&gyro);
+
+    if (okA && okG) {
+      float ax = accel.xData;
+      float ay = accel.yData;
+      float az = accel.zData;
+      float gz = gyro.zData;
+
+      float pitch = rad2deg(atan2(-ax, sqrt(ay * ay + az * az)));
+      float roll  = rad2deg(atan2(ay, az));
+
+      if (calibrando) {
+        sumaPitch += pitch;
+        sumaRoll  += roll;
+        sumaGz    += gz;
+        muestrasCal++;
+
+        if (muestrasCal >= N_CAL) {
+          terminarCalibracion();
+          tAnterior = ahora;
+        }
+      } else {
+        float pitchRel = pitch - pitch0;
+        float rollRel  = roll  - roll0;
+        float gzRel    = gz    - gz0;
+
+        pitchRel = aplicarZonaMuerta(pitchRel, 1.0f);
+        rollRel  = aplicarZonaMuerta(rollRel, 1.0f);
+        gzRel    = aplicarZonaMuerta(gzRel, 1.0f);
+
+        pitchFiltrado = 0.90f * pitchFiltrado + 0.10f * pitchRel;
+        rollFiltrado  = 0.90f * rollFiltrado  + 0.10f * rollRel;
+        gzFiltrado    = 0.90f * gzFiltrado    + 0.10f * gzRel;
+
+        float dx = rollFiltrado * gananciaXY;
+        float dy = pitchFiltrado * gananciaXY;
+
+        if (invertirX) dx = -dx;
+        if (invertirY) dy = -dy;
+
+        posX = CX + dx;
+        posY = CY + dy;
+
+        if (posX < 60.0f) posX = 60.0f;
+        if (posX > 640.0f) posX = 640.0f;
+        if (posY < 60.0f) posY = 60.0f;
+        if (posY > 440.0f) posY = 440.0f;
+
+        float dt = (ahora - tAnterior) / 1000.0f;
+        tAnterior = ahora;
+
+        if (dt < 0.001f) dt = 0.001f;
+        if (dt > 0.1f) dt = 0.1f;
+
+        angulo += gzFiltrado * dt * gananciaGiro;
+
+        while (angulo >= 360.0f) angulo -= 360.0f;
+        while (angulo < 0.0f) angulo += 360.0f;
+      }
+    }
+  }
+
+  if (!calibrando && (ahora - tEnvio >= 120)) {
+    tEnvio = ahora;
+
+    char buffer[160];
+    snprintf(
+      buffer,
+      sizeof(buffer),
+      "{\"x\":%.1f,\"y\":%.1f,\"angulo\":%.1f,\"pitch\":%.2f,\"roll\":%.2f,\"gz\":%.2f}",
+      posX, posY, angulo, pitchFiltrado, rollFiltrado, gzFiltrado
+    );
+
+    socketIO.emit("imu_data", buffer);
+  }
+
+  delay(1);
+}
+```
+
+---
+
+# 2. Código del servidor Node.js
+
+Este archivo puede guardarse como `server.js`.
+
+```js
+const express = require('express');
+const http = require('http');
+const socketio = require('socket.io');
+
+const app = express();
+const server = http.createServer(app);
+const io = socketio(server);
+
+app.use(express.static('public'));
+
+io.on('connection', (socket) => {
+  console.log('Cliente conectado:', socket.id);
+
+  socket.on('imu_data', (data) => {
+    console.log(data);
+    io.emit('imu_data', data);
+  });
+
+  socket.on('calibrar_offsets', () => {
+    io.emit('calibrar_offsets');
+  });
+
+  socket.on('reset_orientacion', () => {
+    io.emit('reset_orientacion');
+  });
+
+  socket.on('reset_total', () => {
+    io.emit('reset_total');
+  });
+
+  socket.on('disconnect', () => {
+    console.log('Cliente desconectado:', socket.id);
+  });
+});
+
+server.listen(5002, () => {
+  console.log('Servidor ejecutándose en http://localhost:5002');
+});
+```
+
+---
+
+# 3. Código HTML de visualización
+
+Este archivo debe guardarse como `index.html` dentro de la carpeta `public`.
+
+```html
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Visualización IMU</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      text-align: center;
+      background: #f2f2f2;
+      margin: 0;
+      padding: 20px;
+    }
+
+    canvas {
+      background: white;
+      border: 1px solid #ccc;
+      margin-top: 20px;
+    }
+
+    .panel, .controles {
+      margin-top: 20px;
+      font-size: 18px;
+      line-height: 1.6;
+    }
+
+    button {
+      margin: 5px;
+      padding: 10px 16px;
+      font-size: 16px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <h1>Visualización remota de IMU</h1>
+
+  <div class="controles">
+    <button onclick="calibrarReferencia()">Calibrar centro</button>
+    <button onclick="ponerAnguloCero()">Poner ángulo en cero</button>
+    <button onclick="resetTotal()">Reset total</button>
+  </div>
+
+  <canvas id="lienzo" width="700" height="500"></canvas>
+  <div class="panel" id="datos"></div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io();
+
+    const canvas = document.getElementById("lienzo");
+    const ctx = canvas.getContext("2d");
+    const datos = document.getElementById("datos");
+
+    let estadoObjetivo = {
+      x: 350,
+      y: 250,
+      angulo: 0,
+      pitch: 0,
+      roll: 0,
+      gz: 0
+    };
+
+    let estadoVisual = {
+      x: 350,
+      y: 250,
+      angulo: 0,
+      pitch: 0,
+      roll: 0,
+      gz: 0
+    };
+
+    socket.on("imu_data", (data) => {
+      try {
+        const obj = (typeof data === "string") ? JSON.parse(data) : data;
+
+        estadoObjetivo.x = obj.x ?? estadoObjetivo.x;
+        estadoObjetivo.y = obj.y ?? estadoObjetivo.y;
+        estadoObjetivo.angulo = obj.angulo ?? estadoObjetivo.angulo;
+        estadoObjetivo.pitch = obj.pitch ?? 0;
+        estadoObjetivo.roll = obj.roll ?? 0;
+        estadoObjetivo.gz = obj.gz ?? 0;
+      } catch (e) {
+        console.error(e);
+      }
+    });
+
+    function calibrarReferencia() {
+      socket.emit("calibrar_offsets");
+    }
+
+    function ponerAnguloCero() {
+      socket.emit("reset_orientacion");
+    }
+
+    function resetTotal() {
+      socket.emit("reset_total");
+    }
+
+    function lerp(a, b, t) {
+      return a + (b - a) * t;
+    }
+
+    function normDelta(a) {
+      while (a > 180) a -= 360;
+      while (a < -180) a += 360;
+      return a;
+    }
+
+    function animar() {
+      estadoVisual.x = lerp(estadoVisual.x, estadoObjetivo.x, 0.15);
+      estadoVisual.y = lerp(estadoVisual.y, estadoObjetivo.y, 0.15);
+
+      let da = normDelta(estadoObjetivo.angulo - estadoVisual.angulo);
+      estadoVisual.angulo += da * 0.12;
+
+      estadoVisual.pitch = lerp(estadoVisual.pitch, estadoObjetivo.pitch, 0.15);
+      estadoVisual.roll = lerp(estadoVisual.roll, estadoObjetivo.roll, 0.15);
+      estadoVisual.gz = lerp(estadoVisual.gz, estadoObjetivo.gz, 0.15);
+
+      dibujar();
+      requestAnimationFrame(animar);
+    }
+
+    function dibujar() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      ctx.strokeStyle = "#ddd";
+      ctx.beginPath();
+      ctx.moveTo(350, 0);
+      ctx.lineTo(350, 500);
+      ctx.moveTo(0, 250);
+      ctx.lineTo(700, 250);
+      ctx.stroke();
+
+      ctx.save();
+      ctx.translate(estadoVisual.x, estadoVisual.y);
+      ctx.rotate(estadoVisual.angulo * Math.PI / 180);
+
+      ctx.fillStyle = "#2e86de";
+      ctx.fillRect(-40, -20, 80, 40);
+
+      ctx.fillStyle = "#e74c3c";
+      ctx.fillRect(20, -5, 20, 10);
+
+      ctx.restore();
+
+      datos.innerHTML = `
+        <strong>Centro calibrado:</strong> la pose al presionar "Calibrar centro"<br>
+        <strong>Posición visual por inclinación:</strong> x=${estadoVisual.x.toFixed(1)}, y=${estadoVisual.y.toFixed(1)}<br>
+        <strong>Ángulo visual:</strong> ${estadoVisual.angulo.toFixed(1)}°<br>
+        <strong>Pitch:</strong> ${estadoVisual.pitch.toFixed(2)}°<br>
+        <strong>Roll:</strong> ${estadoVisual.roll.toFixed(2)}°<br>
+        <strong>Velocidad angular Z:</strong> ${estadoVisual.gz.toFixed(2)} °/s<br><br>
+
+        <strong>Interpretación:</strong><br>
+        - Derecha/izquierda en pantalla: inclinación lateral (<code>roll</code>)<br>
+        - Arriba/abajo en pantalla: inclinación frontal (<code>pitch</code>)<br>
+        - Rotación: giro sobre eje Z (<code>gz</code>)<br>
+        - No representa desplazamiento real en el espacio, sino inclinación relativa.
+      `;
+    }
+
+    requestAnimationFrame(animar);
+  </script>
+</body>
+</html>
+```
+
+---
+
+## Organización sugerida de carpetas
+
+La estructura del proyecto Node.js puede organizarse así:
+
+```text
+proyecto_imu/
+│
+├── server.js
+├── package.json
+└── public/
+    └── index.html
+```
+
+---
+
+## Ejecución del servidor
+
+Dentro de la carpeta del proyecto, se pueden instalar las dependencias con:
+
+```bash
+npm install express socket.io
+```
+
+Después, el servidor puede ejecutarse con:
+
+```bash
+node server.js
+```
+
+---
+
+## Observación final
+
+Esta actualización permite trabajar con una visualización remota más estable del IMU, usando la inclinación como referencia principal. El resultado es más adecuado para observar el comportamiento del sensor y para comprender mejor la diferencia entre:
+
+* **inclinación**
+* **giro**
+* **desplazamiento real**
+
+
